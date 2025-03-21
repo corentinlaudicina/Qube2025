@@ -128,13 +128,22 @@ patients_train = []
 DataStructs.read_clinical_data(patients_train, os.path.join(dir_train, "clinical_train.csv"))
 DataStructs.add_status(patients_train, os.path.join(dir_train, "target_train.csv"))
 DataStructs.add_somatic_mutations(patients_train, os.path.join(dir_train, "molecular_train.csv"))
+DataStructs.aggregate_mutation_features(patients_train)
 
 patients_test = []  
 DataStructs.read_clinical_data(patients_test, os.path.join(dir_test, "clinical_test.csv"))
 DataStructs.add_somatic_mutations(patients_test, os.path.join(dir_test, "molecular_test.csv"))
 
 # Features to extract
-features = ['BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT']
+# features = ['BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT']
+
+features = [
+    'BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT',
+    'mutation_count', 'mean_VAF', 'max_VAF',
+     'has_TP53_mutation', 'tp53_VAF', 
+    'is_normal_karyotype', 'abnormality_count', 'has_monosomy_7',
+    'has_del_5q'
+           ]
 
 target = ['OS_YEARS', 'OS_STATUS']
 
@@ -156,9 +165,12 @@ medians, imputed_ids = impute_median_train_test(X_train,
                                                 )
 
 lgbm_params = {
-    'max_depth': 3,
-    'learning_rate': 0.05,
-    'verbose': -1
+    'objective': 'regression',
+    'learning_rate': 0.1,
+    'max_depth': 5,
+    'num_leaves': 31,
+    'metric': 'l2', 
+    'verbose': 1
 }
 
 # Create the LightGBM dataset using survival time as the label.
@@ -166,7 +178,17 @@ lgbm_params = {
 # we extract the 'time' field to use as a numeric target for regression.
 
 train_dataset = lgb.Dataset(X_train, label=y_train['time'])
-model = lgb.train(params=lgbm_params, train_set=train_dataset)
+test_dataset = lgb.Dataset(X_test, label=y_test['time'], reference=train_dataset)
+
+model = lgb.train(lgbm_params, 
+                  train_set=train_dataset,
+                  valid_sets=[train_dataset, test_dataset],
+                  valid_names=['train', 'val'],
+                  num_boost_round=1000,
+                  callbacks=[
+                             lgb.early_stopping(stopping_rounds=50)
+                            ],
+                  )
 
 pred_train = -model.predict(X_train)
 pred_test = -model.predict(X_test)
@@ -181,26 +203,40 @@ test_ci_ipcw = concordance_index_ipcw(y_train,
                                       pred_test, 
                                       tau=7)[0]
 
-import matplotlib.pyplot as plt
-lgb.plot_importance(model)
-plt.show()
+# import matplotlib.pyplot as plt
+# lgb.plot_importance(model)
+# plt.show()
 
 print(f"LightGBM Survival Model Concordance Index IPCW on train: {train_ci_ipcw:.2f}")
 print(f"LightGBM Survival Model Concordance Index IPCW on test: {test_ci_ipcw:.2f}")
 
 # Initialize and train the Cox Proportional Hazards model
+
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import StandardScaler
+
+# Removes features with zero variance
+selector = VarianceThreshold(threshold=0.0)
+X_train_filtered = selector.fit_transform(X_train)
+X_test_filtered = selector.transform(X_test)
+
+scaler = StandardScaler()
+
+X_train_scaled = scaler.fit_transform(X_train_filtered)
+X_test_scaled = scaler.transform(X_test_filtered)
+
 cox = CoxPHSurvivalAnalysis()
-cox.fit(X_train, y_train)
+cox.fit(X_train_scaled, y_train)
 
 # Evaluate the model using Concordance Index IPCW
 cox_cindex_train = concordance_index_ipcw(y_train, 
                                           y_train, 
-                                          cox.predict(X_train), 
+                                          cox.predict(X_train_scaled), 
                                           tau=7)[0]
 
 cox_cindex_test = concordance_index_ipcw(y_train, 
                                          y_test, 
-                                         cox.predict(X_test), 
+                                         cox.predict(X_test_scaled), 
                                          tau=7)[0]
 
 print(f"Cox Proportional Hazard Model Concordance Index IPCW on train: {cox_cindex_train:.2f}")
