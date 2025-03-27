@@ -17,6 +17,23 @@ class SomaticMutation:
         return (f"SomaticMutation(CHR={self.CHR}, START={self.START}, END={self.END}, "
                 f"GENE={self.GENE}, VAF={self.VAF})")
 
+class CytogeneticObservation:
+    def __init__(self, observation_str):
+        """
+        Parses an individual cytogenetic observation (e.g., '46,xy[20]') into features.
+        """
+        self.features = self.parse_observation(observation_str)
+
+    def parse_observation(self, observation_str):
+        """
+        Parses a single cytogenetic observation into features with automatic lowercasing.
+        """
+        features = observation_str.split(",")
+        return [feature.strip().lower() for feature in features]
+    
+    def __repr__(self):
+        return f"CytogeneticObservation({', '.join(self.features)})"
+
 
 class Patient:
     def __init__(self, ID, CENTER, BM_BLAST, WBC, ANC, MONOCYTES, HB, PLT, CYTOGENETICS, 
@@ -43,16 +60,7 @@ class Patient:
         self.high_impact_count = 0
         self.has_TP53_mutation = 0
         self.tp53_VAF = 0.0
-
-        ## CYTOGENETICS FEATURE
-        self.log_WBC = None
-        self.anc_monocyte_ratio = None
-
-        ## INTERACTION FEATURES 
-        self.plt_hb_ratio = 0
-
         
-
     def __repr__(self):
         return f"Patient(ID={self.ID}, CENTER={self.CENTER}, BM_BLAST={self.BM_BLAST}, ...)"
 
@@ -78,13 +86,17 @@ def read_clinical_data(patients, filename):
             monocytes = safe_parse_float(row[5])
             hb = safe_parse_float(row[6])
             plt_val = safe_parse_float(row[7])
+
             # Cytogenetics: split by '/' unless empty or "NA"
-            if row[8] == "" or row[8].upper() == "NA":
-                cytogenetics = []
-            else:
-                cytogenetics = row[8].split("/")
+            cytogenetic_observations = []
+            if row[8] and row[8].upper() != "NA":
+
+                for str in row[8].split("/"):
+                    obs = CytogeneticObservation(str)
+                    cytogenetic_observations.append(obs)
+            
             # Create a Patient instance and append it to the list
-            patients.append(Patient(patient_id, center, bm_blast, wbc, anc, monocytes, hb, plt_val, cytogenetics))
+            patients.append(Patient(patient_id, center, bm_blast, wbc, anc, monocytes, hb, plt_val, cytogenetic_observations))
 
 def add_status(patients, filename):
     with open(filename, newline="") as csvfile:
@@ -185,6 +197,16 @@ def parse_cytogenetics(patients):
         if "del(5q)" in cyto or "del(5)" in cyto:
             p.has_del_5q = 1
 
+from collections import Counter
+
+def collect_all_cytogenetics(patients):
+    cyto_counter = Counter()
+    for p in patients:
+        if hasattr(p, "CYTOGENETICS"):
+            print(p.CYTOGENETICS)
+    return cyto_counter
+
+
 # # Example usage:
 # patients = []  # List to store Patient objects
 # read_clinical_data(patients, "train/clinical_train.csv")
@@ -195,3 +217,109 @@ def parse_cytogenetics(patients):
 # for p in patients:
 #     # print(p)
 #     print(p.somatic_mutations)
+
+
+
+## HELPER FUNCTIONS FOR MODEL TRAINING ## 
+
+def build_training_data(patients, features, skip_missing_target=True):
+    X_list = []
+    y_numeric_list = []
+    y_structured_list = []
+    id_list = []
+    count_skip = 0
+
+    for p in patients:
+        if skip_missing_target and (p.OS_YEARS is None or p.OS_STATUS is None):
+            count_skip += 1
+            continue
+
+        vals = np.empty(len(features), dtype=float)
+        for i, f in enumerate(features):
+            value = getattr(p, f)
+            vals[i] = float(value) if value is not None else np.nan
+
+        X_list.append(vals)
+        y_numeric_list.append(float(p.OS_YEARS) if p.OS_YEARS is not None else -1.0)
+        y_structured_list.append(
+            (bool(p.OS_STATUS) if p.OS_STATUS is not None else False,
+             float(p.OS_YEARS) if p.OS_YEARS is not None else -1.0)
+        )
+        id_list.append(p.ID)
+
+    X = np.array(X_list)
+    y_numeric = np.array(y_numeric_list, dtype=np.float32)
+    y_structured = np.array(y_structured_list, dtype=[('event', '?'), ('time', '<f8')])
+    print(f"Skipped {count_skip} / {len(patients)} records with missing target or OS_STATUS")
+    
+    return X, y_numeric, y_structured, id_list
+
+def impute_median_train_test(X_train, X_test, patient_ids_train=None):
+    """
+    Impute missing values in X_train with the median computed on X_train,
+    and use those medians to impute missing values in X_test.
+    
+    Optionally, patient_ids_train is a list of patient IDs corresponding to rows in X_train.
+    
+    Returns:
+        medians: 1D NumPy array of medians for each column.
+        imputed_ids: list of patient IDs (from the training set) that had at least one missing value.
+    """
+    medians = np.nanmedian(X_train, axis=0)
+    imputed_ids = []
+    
+    # Impute training set and record which rows were imputed.
+    for j in range(X_train.shape[1]):
+        missing_train = np.isnan(X_train[:, j])
+        if np.any(missing_train):
+            if patient_ids_train is not None:
+                for i in range(X_train.shape[0]):
+                    if missing_train[i]:
+                        imputed_ids.append(patient_ids_train[i])
+            X_train[missing_train, j] = medians[j]
+    
+    # Impute test set using the medians computed from training data.
+    for j in range(X_test.shape[1]):
+        X_test[np.isnan(X_test[:, j]), j] = medians[j]
+    
+    print(f"Imputed {len(imputed_ids)} patients (training set) with missing values.")
+    return medians, imputed_ids
+
+def split_train_test(X, y, ids, test_size=0.3, seed=42):
+    """
+    Splits X, y, and ids into training and testing sets using fixed random seed.
+
+    Parameters:
+        X : np.ndarray
+            Feature matrix.
+        y : np.ndarray
+            Target array (structured or numeric).
+        ids : list
+            Patient IDs corresponding to rows in X.
+        test_size : float
+            Fraction of data to reserve for testing.
+        seed : int
+            Random seed for reproducibility.
+
+    Returns:
+        X_train, X_test, y_train, y_test, id_train, id_test
+    """
+    np.random.seed(seed)
+    n = X.shape[0]
+    indices = np.random.permutation(n)
+    split_idx = int(round((1 - test_size) * n))
+
+    train_idx = indices[:split_idx]
+    test_idx = indices[split_idx:]
+
+    X_train = X[train_idx, :]
+    X_test = X[test_idx, :]
+
+    y_train = y[train_idx]
+    y_test = y[test_idx]
+
+    # id_train = [ids[i] for i in train_idx]
+    # id_test = [ids[i] for i in test_idx]
+
+    return X_train, X_test, y_train, y_test, train_idx, test_idx
+
