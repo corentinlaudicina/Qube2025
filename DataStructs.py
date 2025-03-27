@@ -45,10 +45,13 @@ class Patient:
         self.tp53_VAF = 0.0
 
         ## CYTOGENETICS FEATURE
-        self.is_normal_karyotype = 0
-        self.abnormality_count = 0
-        self.has_monosomy_7 = 0
-        self.has_del_5q = 0
+        self.log_WBC = None
+        self.anc_monocyte_ratio = None
+
+        ## INTERACTION FEATURES 
+        self.plt_hb_ratio = 0
+
+        
 
     def __repr__(self):
         return f"Patient(ID={self.ID}, CENTER={self.CENTER}, BM_BLAST={self.BM_BLAST}, ...)"
@@ -152,8 +155,18 @@ def aggregate_mutation_features(patients):
         p.max_VAF = np.max(VAFs) if VAFs else 0.0
         p.high_impact_count = effects.count("HIGH")
         p.has_TP53_mutation = 1 if "TP53" in genes else 0
-        p.tp53_VAF = 1 if p.tp53_VAF > 0.3 else 0 #max(tp53_vafs) if tp53_vafs else 0.0
+        p.tp53_VAF = 1 if p.tp53_VAF > 0.3 else 0 
         
+        if p.WBC is not None and p.WBC >= 0:
+            p.log_WBC = np.log1p(p.WBC)
+
+        # ANC / MONOCYTE ratio
+        if p.ANC is not None and p.MONOCYTES is not None and p.MONOCYTES > 0:
+            p.anc_monocyte_ratio = p.ANC / p.MONOCYTES
+
+        # Interaction features
+        p.plt_hb_ratio = np.log1p(p.PLT / p.HB) if p.PLT is not None and p.HB is not None and p.HB != 0 else None        
+
 
 def parse_cytogenetics(patients):
     for p in patients:
@@ -171,7 +184,7 @@ def parse_cytogenetics(patients):
             p.has_monosomy_7 = 1
         if "del(5q)" in cyto or "del(5)" in cyto:
             p.has_del_5q = 1
-            
+
 # # Example usage:
 # patients = []  # List to store Patient objects
 # read_clinical_data(patients, "train/clinical_train.csv")

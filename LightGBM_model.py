@@ -1,13 +1,12 @@
 import os
 import numpy as np
-import random
+import pandas as pd
 import lightgbm as lgb
 
-from sksurv.metrics import concordance_index_censored
 from sksurv.metrics import concordance_index_ipcw
-from sksurv.linear_model import CoxPHSurvivalAnalysis
-
-from sksurv.util import Surv
+# from sksurv.linear_model import CoxPHSurvivalAnalysis
+# from sklearn.feature_selection import VarianceThreshold
+# from sklearn.preprocessing import StandardScaler
 
 import DataStructs  
 
@@ -121,123 +120,136 @@ def split_train_test(X, y, ids, test_size=0.3, seed=42):
 
     return X_train, X_test, y_train, y_test, train_idx, test_idx
 
+def get_feature_importance(model, features, X_subset):
+    # Compute SHAP-like importance: how much each feature contributes
+    importance = model.predict(X_subset, pred_contrib=True)[:, :-1]  # last col = bias term
+    abs_mean_importance = np.mean(np.abs(importance), axis=0)
+    return pd.Series(abs_mean_importance, index=features).sort_values(ascending=False)
+
+def train_lightgbm_survival_model(patients, features, tau=7, test_size=0.3, seed=42):
+
+    # --- Build & treat dataset ---
+    X_full, y_numeric, y_full, id_list = build_training_data(patients, features)
+
+    X_train, X_test, y_train, y_test, train_idx, test_idx = split_train_test(
+        X_full, y_full, id_list, test_size=test_size, seed=seed
+    )
+
+    patients_test = [patients[i] for i in test_idx]
+
+    id_train = [id_list[i] for i in train_idx]
+
+    medians, imputed_ids = impute_median_train_test(X_train, X_test, patient_ids_train=id_train)
+
+    # --- Train LightGBM ---
+    lgbm_params = {
+        'objective': 'regression',
+        'learning_rate': 0.1,
+        'max_depth': 7,
+        'num_leaves': 63,
+        'metric': 'l2',
+        'verbose': -1
+    }
+
+    train_dataset = lgb.Dataset(X_train, label=y_train['time'])
+    test_dataset  = lgb.Dataset(X_test,  label=y_test['time'], reference=train_dataset)
+
+    model = lgb.train(
+        lgbm_params,
+        train_set=train_dataset,
+        valid_sets=[train_dataset, test_dataset],
+        valid_names=['train', 'val'],
+        num_boost_round=1000,
+        callbacks=[lgb.early_stopping(stopping_rounds=50)]
+    )
+
+    # --- Evaluate model on sub-populations ---
+    pred_train = -model.predict(X_train)
+    pred_test  = -model.predict(X_test)
+
+    ci_train = concordance_index_ipcw(y_train, y_train, pred_train, tau=tau)[0]
+    ci_test  = concordance_index_ipcw(y_train, y_test,  pred_test,  tau=tau)[0]
+
+    print(f"LightGBM Survival Model Concordance Index IPCW on train: {ci_train:.4f}")
+    print(f"LightGBM Survival Model Concordance Index IPCW on test: {ci_test:.4f}")
+
+    test_tp53_pos = [i for i, p in enumerate(patients_test) if p.has_TP53_mutation == 1]
+    test_tp53_neg = [i for i, p in enumerate(patients_test) if p.has_TP53_mutation == 0]
+
+    X_pos = X_test[test_tp53_pos, :]
+    y_pos = y_test[test_tp53_pos]
+
+    X_neg = X_test[test_tp53_neg, :]
+    y_neg = y_test[test_tp53_neg]
+
+    pred_pos = -model.predict(X_pos)
+    pred_neg = -model.predict(X_neg)
+
+    ci_pos = concordance_index_ipcw(y_train, y_pos, pred_pos, tau=7)[0]
+    ci_neg = concordance_index_ipcw(y_train, y_neg, pred_neg, tau=7)[0]
+
+    print(f"TP53+ C-index: {ci_pos:.4f}")
+    print(f"TP53− C-index: {ci_neg:.4f}")
+
+    importance_tp53_pos = get_feature_importance(model, features, X_pos)
+    importance_tp53_neg = get_feature_importance(model, features, X_neg)
+    importance_df = pd.DataFrame({"TP53+": importance_tp53_pos,
+                                  "TP53−": importance_tp53_neg
+                                 }).round(3)
+
+    print(importance_df)
+
+    # return 0.0 model , X_train, X_test, y_train, y_test, pred_train, pred_test
+
+
+#### MAIN ####
+
 dir_train = "train"
 dir_test  = "test"
 
-patients_train = []  
+features = ['BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT',
+            'mutation_count', 'mean_VAF', 'max_VAF',
+            'has_TP53_mutation', 'log_WBC', 'anc_monocyte_ratio',
+            'plt_hb_ratio'
+            ]
+
+patients_train = []
 DataStructs.read_clinical_data(patients_train, os.path.join(dir_train, "clinical_train.csv"))
 DataStructs.add_status(patients_train, os.path.join(dir_train, "target_train.csv"))
 DataStructs.add_somatic_mutations(patients_train, os.path.join(dir_train, "molecular_train.csv"))
 DataStructs.aggregate_mutation_features(patients_train)
 
-patients_test = []  
-DataStructs.read_clinical_data(patients_test, os.path.join(dir_test, "clinical_test.csv"))
-DataStructs.add_somatic_mutations(patients_test, os.path.join(dir_test, "molecular_test.csv"))
 
-# Features to extract
-# features = ['BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT']
+train_lightgbm_survival_model(patients_train, 
+                              features, 
+                              tau=7, 
+                              test_size=0.3, 
+                              seed=42
+                              )
 
-features = [
-    'BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT',
-    'mutation_count', 'mean_VAF', 'max_VAF',
-     'has_TP53_mutation', 'tp53_VAF', 
-    'is_normal_karyotype', 'abnormality_count', 'has_monosomy_7',
-    'has_del_5q'
-           ]
 
-target = ['OS_YEARS', 'OS_STATUS']
+# # # CPH unstable for singular training data
+# selector = VarianceThreshold(threshold=0.0)
+# X_train_filtered = selector.fit_transform(X_train)
+# X_test_filtered = selector.transform(X_test)
 
-# training data from patients_train.
-X_full, y_numeric, y_full, id_list = build_training_data(patients_train, features)
+# scaler = StandardScaler()
 
-X_train, X_test, y_train, y_test, train_idx, test_idx = split_train_test(X_full, 
-                                                                       y_full, 
-                                                                       id_list, 
-                                                                       test_size=0.3, 
-                                                                       seed=42)
+# X_train_scaled = scaler.fit_transform(X_train_filtered)
+# X_test_scaled = scaler.transform(X_test_filtered)
 
-id_train = [id_list[i] for i in train_idx]
-id_test = [id_list[i] for i in test_idx]
+# cox = CoxPHSurvivalAnalysis()
+# cox.fit(X_train_scaled, y_train)
 
-medians, imputed_ids = impute_median_train_test(X_train, 
-                                                X_test, 
-                                                patient_ids_train=id_train
-                                                )
+# cox_cindex_train = concordance_index_ipcw(y_train, 
+#                                           y_train, 
+#                                           cox.predict(X_train_scaled), 
+#                                           tau=7)[0]
 
-lgbm_params = {
-    'objective': 'regression',
-    'learning_rate': 0.1,
-    'max_depth': 5,
-    'num_leaves': 31,
-    'metric': 'l2', 
-    'verbose': 1
-}
+# cox_cindex_test = concordance_index_ipcw(y_train, 
+#                                          y_test, 
+#                                          cox.predict(X_test_scaled), 
+#                                          tau=7)[0]
 
-# Create the LightGBM dataset using survival time as the label.
-# Since y_train is a structured array with fields ['event', 'time'],
-# we extract the 'time' field to use as a numeric target for regression.
-
-train_dataset = lgb.Dataset(X_train, label=y_train['time'])
-test_dataset = lgb.Dataset(X_test, label=y_test['time'], reference=train_dataset)
-
-model = lgb.train(lgbm_params, 
-                  train_set=train_dataset,
-                  valid_sets=[train_dataset, test_dataset],
-                  valid_names=['train', 'val'],
-                  num_boost_round=1000,
-                  callbacks=[
-                             lgb.early_stopping(stopping_rounds=50)
-                            ],
-                  )
-
-pred_train = -model.predict(X_train)
-pred_test = -model.predict(X_test)
-
-train_ci_ipcw = concordance_index_ipcw(y_train, 
-                                       y_train, 
-                                       pred_train, 
-                                       tau=7)[0]
-
-test_ci_ipcw = concordance_index_ipcw(y_train, 
-                                      y_test, 
-                                      pred_test, 
-                                      tau=7)[0]
-
-# import matplotlib.pyplot as plt
-# lgb.plot_importance(model)
-# plt.show()
-
-print(f"LightGBM Survival Model Concordance Index IPCW on train: {train_ci_ipcw:.2f}")
-print(f"LightGBM Survival Model Concordance Index IPCW on test: {test_ci_ipcw:.2f}")
-
-# Initialize and train the Cox Proportional Hazards model
-
-from sklearn.feature_selection import VarianceThreshold
-from sklearn.preprocessing import StandardScaler
-
-# Removes features with zero variance
-selector = VarianceThreshold(threshold=0.0)
-X_train_filtered = selector.fit_transform(X_train)
-X_test_filtered = selector.transform(X_test)
-
-scaler = StandardScaler()
-
-X_train_scaled = scaler.fit_transform(X_train_filtered)
-X_test_scaled = scaler.transform(X_test_filtered)
-
-cox = CoxPHSurvivalAnalysis()
-cox.fit(X_train_scaled, y_train)
-
-# Evaluate the model using Concordance Index IPCW
-cox_cindex_train = concordance_index_ipcw(y_train, 
-                                          y_train, 
-                                          cox.predict(X_train_scaled), 
-                                          tau=7)[0]
-
-cox_cindex_test = concordance_index_ipcw(y_train, 
-                                         y_test, 
-                                         cox.predict(X_test_scaled), 
-                                         tau=7)[0]
-
-print(f"Cox Proportional Hazard Model Concordance Index IPCW on train: {cox_cindex_train:.2f}")
-print(f"Cox Proportional Hazard Model Concordance Index IPCW on test: {cox_cindex_test:.2f}")
+# print(f"Cox Proportional Hazard Model Concordance Index IPCW on train: {cox_cindex_train:.4f}")
+# print(f"Cox Proportional Hazard Model Concordance Index IPCW on test: {cox_cindex_test:.4f}")
