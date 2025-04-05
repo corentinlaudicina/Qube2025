@@ -30,11 +30,12 @@ def train_lightgbm_survival_model(patients, features, tau=7, test_size=0.3, seed
     # --- Train LightGBM ---
     lgbm_params = lgbm_params or {
         'objective': 'regression',
-        'learning_rate': 0.1,
-        'max_depth': 3,
-        'num_leaves': 15,
-        'feature_fraction': 0.8, 
+        'learning_rate': 0.05,
+        'max_depth': 5,
+        'num_leaves': 31,
+        'feature_fraction': 0.8,
         'bagging_fraction': 0.8,
+        'lambda_l2': 5.0,
         'metric': 'l2',
         'verbose': -1
         }
@@ -79,7 +80,7 @@ dir_test  = os.path.join(project_root,"test")
 
 base_features = [
                 'BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT',
-                'mutation_count', 'mean_VAF', 'max_VAF', 'has_TP53_mutation', 
+                # 'mutation_count', 'mean_VAF', 'max_VAF', 'has_TP53_mutation', 
                 ]
 
 patients_train = []
@@ -88,19 +89,14 @@ DataStructs.add_status(patients_train, os.path.join(dir_train, "target_train.csv
 DataStructs.add_somatic_mutations(patients_train, os.path.join(dir_train, "molecular_train.csv"))
 DataStructs.aggregate_mutation_features(patients_train)
 
-gene_df, gene_ids, gene_cols = EncodeMutations.build_top_gene_features(patients_train, top_n=10)
+# mutation_cluster_features = EncodeMutations.assign_mutation_cluster(patients_train, encoding_dim = 8)
+# cyto_features = EncodeCytogenetics.assign_cytogenetic_cluster(patients_train, encoding_dim = 8)  
 
-# Attach to patients
-gene_map = gene_df.to_dict(orient="index")
-for p in patients_train:
-    if p.ID in gene_map:
-        for key, val in gene_map[p.ID].items():
-            setattr(p, f"mut_{key}", val)
+mutation_embed_features = EncodeMutations.get_mutation_autoencoder_embedding(patients_train, encoding_dim = 3)
+cyto_embed_features = EncodeCytogenetics.get_cytogenetic_autoencoder_embedding(patients_train, encoding_dim = 3)
 
+features =  mutation_embed_features + cyto_embed_features
 
-cyto_features = EncodeCytogenetics.assign_cytogenetic_cluster(patients_train)  
-
-features = base_features + [f"mut_{g}" for g in gene_cols] + cyto_features
 
 train_lightgbm_survival_model(patients_train, 
                               features, 

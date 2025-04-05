@@ -57,7 +57,7 @@ def train_autoencoder(X, encoding_dim=16, epochs=50, batch_size=32):
     autoencoder.fit(X, X, epochs=epochs, batch_size=batch_size, shuffle=True, verbose=0)
 
     encoder = Model(input_layer, encoded)
-    return encoder
+    return encoder, autoencoder
 
 def get_cytogenetic_autoencoder_embedding(patients, encoding_dim=16, epochs=50, batch_size=32):
     """
@@ -71,7 +71,7 @@ def get_cytogenetic_autoencoder_embedding(patients, encoding_dim=16, epochs=50, 
     X_binary, patient_ids, feature_names = build_binary_cytogenetic_matrix(patients)
 
     # Train autoencoder
-    encoder = train_autoencoder(X_binary, encoding_dim=encoding_dim, epochs=epochs, batch_size=batch_size)
+    encoder, _ = train_autoencoder(X_binary, encoding_dim=encoding_dim, epochs=epochs, batch_size=batch_size)
     X_embed = encoder.predict(X_binary)
 
     # Map embeddings back to patients
@@ -87,7 +87,7 @@ def get_cytogenetic_autoencoder_embedding(patients, encoding_dim=16, epochs=50, 
         else:
             print(f"[Warning] Patient ID {pid} not found in patient list")
 
-    print(f"✅ Assigned cytogenetic autoencoder embeddings to {assigned_count} patients.")
+    print(f"Assigned cytogenetic autoencoder embeddings to {assigned_count} patients.")
     return [f"cyto_embed_{i}" for i in range(encoding_dim)]
 
 def assign_cytogenetic_cluster(patients, encoding_dim=16, epochs=50, batch_size=32, n_clusters=5):

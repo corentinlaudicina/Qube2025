@@ -15,10 +15,12 @@ from sklearn.preprocessing import StandardScaler
 import DataStructs, EncodeMutations, EncodeCytogenetics
 
 dir_train = os.path.join(project_root,"train")
+dir_test = os.path.join(project_root,"test")
 
 base_features = [
                 'BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT',
-                'mutation_count', 'mean_VAF', 'max_VAF', 'has_TP53_mutation', 
+                'mutation_count', 'mean_VAF', 'has_TP53_mutation', 
+                'is_normal_karyotype', 'abnormality_count', 'has_monosomy_7', 'has_del_5q'
                 ]
 
 patients_train = []
@@ -26,19 +28,34 @@ DataStructs.read_clinical_data(patients_train, os.path.join(dir_train, "clinical
 DataStructs.add_status(patients_train, os.path.join(dir_train, "target_train.csv"))
 DataStructs.add_somatic_mutations(patients_train, os.path.join(dir_train, "molecular_train.csv"))
 DataStructs.aggregate_mutation_features(patients_train)
+DataStructs.parse_cytogenetics(patients_train)
+
+
+patients_test = []
+DataStructs.read_clinical_data(patients_test, os.path.join(dir_test, "clinical_test.csv"))
+DataStructs.add_somatic_mutations(patients_test, os.path.join(dir_test, "molecular_test.csv"))
+DataStructs.aggregate_mutation_features(patients_test)
+DataStructs.parse_cytogenetics(patients_test)
+
+
+patients_all = patients_train + patients_test
+
+mutation_embed_features_all = EncodeMutations.get_mutation_autoencoder_embedding(patients_all, encoding_dim=4)
+
+# cyto_embed_features_all = EncodeCytogenetics.get_cytogenetic_autoencoder_embedding(patients_all, encoding_dim=4)
 
 # mutation_cluster_features = EncodeMutations.assign_mutation_cluster(patients_train, encoding_dim = 8)
 # cyto_features = EncodeCytogenetics.assign_cytogenetic_cluster(patients_train, encoding_dim = 8)  
 
-mutation_embed_features = EncodeMutations.get_mutation_autoencoder_embedding(patients_train, encoding_dim = 4)
-cyto_embed_features = EncodeCytogenetics.get_cytogenetic_autoencoder_embedding(patients_train, encoding_dim = 4)
+# mutation_embed_features = EncodeMutations.get_mutation_autoencoder_embedding(patients_train, encoding_dim = 4)
+# cyto_embed_features = EncodeCytogenetics.get_cytogenetic_autoencoder_embedding(patients_train, encoding_dim = 4)
 
-features = base_features + mutation_embed_features + cyto_embed_features
+features = base_features + mutation_embed_features_all #+ cyto_embed_features_all
 
-# # --- Build & treat dataset ---
+## --- Build dataset from training data---
 X_full, y_numeric, y_full, id_list = DataStructs.build_training_data(patients_train, features)
 
-test_size=0.1
+test_size = 0.33
 seed = 42 
 X_train, X_test, y_train, y_test, train_idx, test_idx = DataStructs.split_train_test(
     X_full, y_full, id_list, test_size=test_size, seed=seed
@@ -71,39 +88,34 @@ model = CoxPH(net, tt.optim.Adam(lr=1e-4))
 model.fit(X_train_scaled, y_train_pyc, batch_size=64, epochs=300, val_data=(X_test_scaled, (T_test, E_test)))
 model.compute_baseline_hazards()
 
+surv_test = model.predict_surv_df(X_test_scaled)
+surv_train = model.predict_surv_df(X_train_scaled)
 
-surv = model.predict_surv_df(X_test_scaled)
-ev = EvalSurv(surv, T_test, E_test, censor_surv='km')
-print("C-index:", ev.concordance_td())
+ev_train = EvalSurv(surv_train, T_train, E_train, censor_surv='km')
+print("C-index train:", ev_train.concordance_td())
 
-# import pandas as pd
+ev_test = EvalSurv(surv_test, T_test, E_test, censor_surv='km')
+print("C-index test:", ev_test.concordance_td())
 
-# dir_test = os.path.join(project_root, "test")
 
-# # --- Load & preprocess test patients ---
-# patients_test = []
-# DataStructs.read_clinical_data(patients_test, os.path.join(dir_test, "clinical_test.csv"))
-# DataStructs.add_somatic_mutations(patients_test, os.path.join(dir_test, "molecular_test.csv"))
-# DataStructs.aggregate_mutation_features(patients_test)
+## Inference on test data 
 
-# # --- Apply encodings ---
-# mutation_embed_features = EncodeMutations.get_mutation_autoencoder_embedding(patients_test, encoding_dim=4)
-# cyto_embed_features = EncodeCytogenetics.get_cytogenetic_autoencoder_embedding(patients_test, encoding_dim=4)
+# X_test, _, _, test_ids = DataStructs.build_training_data(patients_test, 
+#                                                         features, 
+#                                                         skip_missing_time=False
+#                                                         )
 
-# # --- Ensure same feature list as used during training ---
-# features = base_features + mutation_embed_features + cyto_embed_features
+# _, _ = DataStructs.impute_median_train_test(X_train, X_test)
 
-# # --- Build test feature matrix ---
-# X_test_submission, _, _, test_ids = DataStructs.build_training_data(patients_test, 
-#                                                                     features, 
-#                                                                     skip_missing_target=False
-#                                                                     )
-# X_test_submission = scaler.transform(X_test_submission)
-# X_test_submission = X_test_submission.astype(np.float32)
+# X_test_scaled = scaler.transform(X_test).astype(np.float32)
 
-# # --- Predict risk scores ---
-# risk_scores = -model.predict(X_test_submission).flatten()  # Negative for risk -> survival logic
+# risk_scores = model.predict(X_test_scaled).flatten()
 
-# # --- Create submission file ---
-# submission = pd.Series(risk_scores, index=test_ids, name='risk_score')
-# submission.to_csv("submission.csv", index_label="ID")
+# print(np.min(risk_scores), np.max(risk_scores), np.mean(risk_scores))
+
+# submission_array = np.column_stack((np.array(test_ids), risk_scores))
+
+# with open("submission.csv", "w") as f:
+#     f.write("ID,risk_score\n")
+#     for row in submission_array:
+#         f.write(f"{row[0]},{row[1]}\n")

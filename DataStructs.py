@@ -3,6 +3,8 @@ import numpy as np
 
 class SomaticMutation:
     def __init__(self, CHR, START, END, REF, ALT, GENE, PROTEIN_CHANGE, EFFECT, VAF):
+
+        ## Molecular features
         self.CHR = CHR
         self.START = START
         self.END = END
@@ -20,7 +22,7 @@ class SomaticMutation:
 class CytogeneticObservation:
     def __init__(self, observation_str):
         """
-        Parses an individual cytogenetic observation (e.g., '46,xy[20]') into features.
+        Parses an individual cytogenetic observation into features.
         """
         self.features = self.parse_observation(observation_str)
 
@@ -53,7 +55,7 @@ class Patient:
 
         self.somatic_mutations = somatic_mutations if somatic_mutations is not None else []
 
-        ## MUTATION FEATURES
+        ## Extended Mutation features
         self.mutation_count = 0
         self.mean_VAF = 0.0
         self.max_VAF = 0.0
@@ -75,7 +77,7 @@ def safe_parse_float(value: str):
 def read_clinical_data(patients, filename):
     with open(filename, newline="") as csvfile:
         reader = csv.reader(csvfile)
-        header = next(reader)  # Skip header
+        header = next(reader)  
         print("Processing patients ...")
         for row in reader:
             patient_id = row[0]
@@ -95,18 +97,17 @@ def read_clinical_data(patients, filename):
                     obs = CytogeneticObservation(str)
                     cytogenetic_observations.append(obs)
             
-            # Create a Patient instance and append it to the list
             patients.append(Patient(patient_id, center, bm_blast, wbc, anc, monocytes, hb, plt_val, cytogenetic_observations))
 
 def add_status(patients, filename):
     with open(filename, newline="") as csvfile:
         reader = csv.reader(csvfile)
-        next(reader)  # Skip header
+        next(reader)  
         for target_row in reader:
             target_id = target_row[0]
             OS_years_str = target_row[1]
             status_str = target_row[2]
-            # Find matching patient by ID and update status fields
+
             for patient in patients:
                 if patient.ID == target_id:
                     patient.OS_YEARS = safe_parse_float(OS_years_str)
@@ -116,12 +117,12 @@ def add_status(patients, filename):
                         patient.OS_STATUS = False
                     else:
                         patient.OS_STATUS = None
-                    break  # assuming IDs are unique
+                    break  
 
 def add_somatic_mutations(patients, filename):
     with open(filename, newline="") as csvfile:
         reader = csv.reader(csvfile)
-        next(reader)  # Skip header
+        next(reader)  
         for row in reader:
             patient_id = row[0]
             CHR = row[1]
@@ -160,8 +161,6 @@ def aggregate_mutation_features(patients):
         effects = [m.EFFECT for m in muts]
         genes = [m.GENE for m in muts]
 
-        tp53_vafs = [m.VAF for m in muts if m.GENE == "TP53" and m.VAF is not None]
-
         p.mutation_count = len(muts)
         p.mean_VAF = np.mean(VAFs) if VAFs else 0.0
         p.max_VAF = np.max(VAFs) if VAFs else 0.0
@@ -182,21 +181,32 @@ def aggregate_mutation_features(patients):
 
 def parse_cytogenetics(patients):
     for p in patients:
-        cyto = p.CYTOGENETICS.upper() if p.CYTOGENETICS else ""
+        # Flatten all features from all observations and join them into one string
+        if p.CYTOGENETICS:
+            cyto_features = [f for obs in p.CYTOGENETICS for f in obs.features]
+            cyto = ",".join(cyto_features).lower()
+        else:
+            cyto = ""
+
+        # Initialize all features
+        p.is_normal_karyotype = 0
+        p.abnormality_count   = 0
+        p.has_monosomy_7      = 0
+        p.has_del_5q          = 0
 
         # Normal karyotypes
         if "46,xx" in cyto or "46,xy" in cyto:
             p.is_normal_karyotype = 1
 
         # abnormalities (naive count of '+'/'-'/'del(')
-        p.abnormality_count = cyto.count('+') + cyto.count('-') + cyto.count('DEL(')
+        p.abnormality_count = cyto.count('+') + cyto.count('-') + cyto.count('del(')
 
         # high-risk markers
         if "-7" in cyto:
             p.has_monosomy_7 = 1
         if "del(5q)" in cyto or "del(5)" in cyto:
             p.has_del_5q = 1
-
+            
 from collections import Counter
 
 def collect_all_cytogenetics(patients):
@@ -222,7 +232,7 @@ def collect_all_cytogenetics(patients):
 
 ## HELPER FUNCTIONS FOR MODEL TRAINING ## 
 
-def build_training_data(patients, features, skip_missing_target=True):
+def build_training_data(patients, features, skip_missing_time=True):
     X_list = []
     y_numeric_list = []
     y_structured_list = []
@@ -230,7 +240,7 @@ def build_training_data(patients, features, skip_missing_target=True):
     count_skip = 0
 
     for p in patients:
-        if skip_missing_target and (p.OS_YEARS is None or p.OS_STATUS is None):
+        if skip_missing_time and p.OS_YEARS is None:
             count_skip += 1
             continue
 
@@ -241,16 +251,16 @@ def build_training_data(patients, features, skip_missing_target=True):
 
         X_list.append(vals)
         y_numeric_list.append(float(p.OS_YEARS) if p.OS_YEARS is not None else -1.0)
-        y_structured_list.append(
-            (bool(p.OS_STATUS) if p.OS_STATUS is not None else False,
-             float(p.OS_YEARS) if p.OS_YEARS is not None else -1.0)
-        )
+        y_structured_list.append((
+            bool(p.OS_STATUS) if p.OS_STATUS is not None else False,
+            float(p.OS_YEARS) if p.OS_YEARS is not None else -1.0
+        ))
         id_list.append(p.ID)
 
     X = np.array(X_list)
     y_numeric = np.array(y_numeric_list, dtype=np.float32)
     y_structured = np.array(y_structured_list, dtype=[('event', '?'), ('time', '<f8')])
-    print(f"Skipped {count_skip} / {len(patients)} records with missing target or OS_STATUS")
+    print(f"Skipped {count_skip} / {len(patients)} records with missing OS_YEARS")
     
     return X, y_numeric, y_structured, id_list
 

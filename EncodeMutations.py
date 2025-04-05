@@ -1,4 +1,5 @@
 import numpy as np 
+from collections import Counter
 
 from tensorflow.keras import layers, models
 from tensorflow.keras import regularizers
@@ -49,17 +50,14 @@ def train_autoencoder(X, encoding_dim=16, epochs=50, batch_size=32):
     input_dim = X.shape[1]
     input_layer = Input(shape=(input_dim,))
 
-    # Encoder with L2 + dropout
     encoded = Dense(64, activation='relu',
                     kernel_regularizer=regularizers.l2(1e-4))(input_layer)
     encoded = Dropout(0.3)(encoded)  # Dropout for regularization
     encoded = Dense(encoding_dim, activation='relu')(encoded)
 
-    # Decoder
     decoded = Dense(64, activation='relu')(encoded)
     decoded = Dense(input_dim, activation='sigmoid')(decoded)
 
-    # Autoencoder
     autoencoder = Model(input_layer, decoded)
     autoencoder.compile(optimizer='adam', loss='binary_crossentropy')
 
@@ -69,15 +67,14 @@ def train_autoencoder(X, encoding_dim=16, epochs=50, batch_size=32):
                     shuffle=True,
                     verbose=0)
 
-    # Encoder model
     encoder = Model(input_layer, encoded)
-    return encoder
+    return encoder, autoencoder
 
 def get_mutation_autoencoder_embedding(patients, encoding_dim=16, epochs=50, batch_size=32):
     mutation_matrix, patient_ids, selected_genes = build_binary_mutation_matrix(patients, min_gene_freq=5)
     X_binary = mutation_matrix
 
-    encoder = train_autoencoder(X_binary, encoding_dim=encoding_dim, epochs=epochs, batch_size=batch_size)
+    encoder, _ = train_autoencoder(X_binary, encoding_dim=encoding_dim, epochs=epochs, batch_size=batch_size)
     X_embed = encoder.predict(X_binary)
 
     pid_map = {p.ID: p for p in patients}
@@ -115,73 +112,51 @@ def assign_mutation_cluster(patients, encoding_dim=16, epochs=50, batch_size=32,
     return [f"mutation_cluster_{i}" for i in range(n_clusters)]
 
 def build_top_gene_features(patients, top_n=50):
-    """
-    Builds a binary matrix (patients x top-N genes) from somatic mutations.
-    Each feature is just GENE (not gene:protein_change).
-
-    Returns:
-        binary_df: DataFrame (rows = patients, cols = top features)
-        patient_ids: list of patient IDs
-        feature_names: list of selected gene names
-    """
+    # Count gene frequencies
     gene_list = []
-
     for p in patients:
         for mut in p.somatic_mutations:
             gene_list.append(mut.GENE)
-
-    counts = pd.Series(gene_list).value_counts()
-    top_genes = set(counts.head(top_n).index)
-
-    patient_ids = []
-    rows = []
+    top_genes = [g for g, _ in Counter(gene_list).most_common(top_n)]
     feature_names = sorted(top_genes)
 
+    patient_ids = []
+    data = []
     for p in patients:
-        row = {g: 0 for g in feature_names}
-        for mut in p.somatic_mutations:
-            if mut.GENE in top_genes:
-                row[mut.GENE] = 1
-        rows.append(row)
+        row = [0] * len(feature_names)
+        genes = {mut.GENE for mut in p.somatic_mutations}
+        for i, gene in enumerate(feature_names):
+            if gene in genes:
+                row[i] = 1
+        data.append(row)
         patient_ids.append(p.ID)
 
-    binary_df = pd.DataFrame(rows, index=patient_ids)
-    return binary_df, patient_ids, feature_names
+    X = np.array(data, dtype=np.uint8)
+    return X, patient_ids, feature_names
 
 def build_top_mutation_features(patients, top_n=5):
-    """
-    Builds a binary matrix (patients x top-N mutations) using gene:protein_change as keys.
-    Returns:
-        binary_df: DataFrame (rows = patients, cols = top features)
-        patient_ids: list of patient IDs
-        feature_names: list of selected mutation keys
-    """
-    mutation_keys = []
-
+    # Count full mutation keys
+    key_list = []
     for p in patients:
         for mut in p.somatic_mutations:
             key = f"{mut.GENE}:{mut.PROTEIN_CHANGE}"
-            mutation_keys.append(key)
-
-    # Count and select top-N mutations
-    counts = pd.Series(mutation_keys).value_counts()
-    top_features = set(counts.head(top_n).index)
+            key_list.append(key)
+    top_keys = [k for k, _ in Counter(key_list).most_common(top_n)]
+    feature_names = sorted(top_keys)
 
     patient_ids = []
-    rows = []
-    feature_names = sorted(top_features)
-
+    data = []
     for p in patients:
-        row = {f: 0 for f in feature_names}
-        for mut in p.somatic_mutations:
-            key = f"{mut.GENE}:{mut.PROTEIN_CHANGE}"
-            if key in top_features:
-                row[key] = 1
-        rows.append(row)
+        row = [0] * len(feature_names)
+        keys = {f"{mut.GENE}:{mut.PROTEIN_CHANGE}" for mut in p.somatic_mutations}
+        for i, key in enumerate(feature_names):
+            if key in keys:
+                row[i] = 1
+        data.append(row)
         patient_ids.append(p.ID)
 
-    binary_df = pd.DataFrame(rows, index=patient_ids)
-    return binary_df, patient_ids, feature_names
+    X = np.array(data, dtype=np.uint8)
+    return X, patient_ids, feature_names
 
 # dir_train = "train"
 
