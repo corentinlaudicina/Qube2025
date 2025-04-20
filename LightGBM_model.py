@@ -14,7 +14,6 @@ import DataStructs, EncodeMutations, EncodeCytogenetics
 
 def train_lightgbm_survival_model(patients, features, tau=7, test_size=0.3, seed=42, lgbm_params=None):
 
-    # --- Build & treat dataset ---
     X_full, y_numeric, y_full, id_list = DataStructs.build_training_data(patients, features)
 
     X_train, X_test, y_train, y_test, train_idx, test_idx = DataStructs.split_train_test(
@@ -27,7 +26,6 @@ def train_lightgbm_survival_model(patients, features, tau=7, test_size=0.3, seed
 
     medians, imputed_ids = DataStructs.impute_median_train_test(X_train, X_test, patient_ids_train=id_train)
 
-    # --- Train LightGBM ---
     lgbm_params = lgbm_params or {
         'objective': 'regression',
         'learning_rate': 0.05,
@@ -60,27 +58,23 @@ def train_lightgbm_survival_model(patients, features, tau=7, test_size=0.3, seed
     print(f"LightGBM Survival Model Concordance Index IPCW on train: {ci_train:.4f}")
     print(f"LightGBM Survival Model Concordance Index IPCW on test: {ci_test:.4f}")
 
+    cox = CoxPHSurvivalAnalysis(alpha=1e-4)
+    cox.fit(X_train, y_train)
 
-    # # Initialize and train the Cox Proportional Hazards model
-    # cox = CoxPHSurvivalAnalysis(alpha=1e-4)
-    # cox.fit(X_train, y_train)
-
-    # # Evaluate the model using Concordance Index IPCW
-    # cox_cindex_train = concordance_index_ipcw(y_train, y_train, cox.predict(X_train), tau=7)[0]
-    # cox_cindex_test = concordance_index_ipcw(y_train, y_test, cox.predict(X_test), tau=7)[0]
-    # print(f"Cox Proportional Hazard Model Concordance Index IPCW on train: {cox_cindex_train:.2f}")
-    # print(f"Cox Proportional Hazard Model Concordance Index IPCW on test: {cox_cindex_test:.2f}")
+    cox_cindex_train = concordance_index_ipcw(y_train, y_train, cox.predict(X_train), tau=7)[0]
+    cox_cindex_test = concordance_index_ipcw(y_train, y_test, cox.predict(X_test), tau=7)[0]
+    print(f"Cox Proportional Hazard Model Concordance Index IPCW on train: {cox_cindex_train:.4f}")
+    print(f"Cox Proportional Hazard Model Concordance Index IPCW on test: {cox_cindex_test:.4f}")
 
     return ci_test, model
-
-#### MAIN ####
 
 dir_train = os.path.join(project_root,"train")
 dir_test  = os.path.join(project_root,"test")
 
 base_features = [
                 'BM_BLAST', 'WBC', 'ANC', 'MONOCYTES', 'HB', 'PLT',
-                # 'mutation_count', 'mean_VAF', 'max_VAF', 'has_TP53_mutation', 
+                'mutation_count', 'mean_VAF', 'has_TP53_mutation', 
+                'is_normal_karyotype', 'abnormality_count', 'has_monosomy_7', 'has_del_5q'
                 ]
 
 patients_train = []
@@ -88,22 +82,44 @@ DataStructs.read_clinical_data(patients_train, os.path.join(dir_train, "clinical
 DataStructs.add_status(patients_train, os.path.join(dir_train, "target_train.csv"))
 DataStructs.add_somatic_mutations(patients_train, os.path.join(dir_train, "molecular_train.csv"))
 DataStructs.aggregate_mutation_features(patients_train)
-
-# mutation_cluster_features = EncodeMutations.assign_mutation_cluster(patients_train, encoding_dim = 8)
-# cyto_features = EncodeCytogenetics.assign_cytogenetic_cluster(patients_train, encoding_dim = 8)  
-
-mutation_embed_features = EncodeMutations.get_mutation_autoencoder_embedding(patients_train, encoding_dim = 3)
-cyto_embed_features = EncodeCytogenetics.get_cytogenetic_autoencoder_embedding(patients_train, encoding_dim = 3)
-
-features =  mutation_embed_features + cyto_embed_features
+DataStructs.parse_cytogenetics(patients_train)
 
 
-train_lightgbm_survival_model(patients_train, 
+patients_test = []
+DataStructs.read_clinical_data(patients_test, os.path.join(dir_test, "clinical_test.csv"))
+DataStructs.add_somatic_mutations(patients_test, os.path.join(dir_test, "molecular_test.csv"))
+DataStructs.aggregate_mutation_features(patients_test)
+DataStructs.parse_cytogenetics(patients_test)
+
+
+patients_all = patients_train + patients_test
+
+mutation_embed_features_all = EncodeMutations.get_mutations_embedding(patients_all, 
+                                                                      EncodeMutations.build_mut_tfidf_matrix, 
+                                                                      embed_prefix="embed_mut", 
+                                                                      encoding_dim=8, 
+                                                                      epochs=50, 
+                                                                      batch_size=32
+                                                                      )
+
+cyto_embed_features_all = EncodeCytogenetics.get_cytogenetic_embedding(patients_all, 
+                                                                       EncodeCytogenetics.build_cyto_tfidf_matrix, 
+                                                                       embed_prefix="embed_cyto", 
+                                                                       encoding_dim=8, 
+                                                                       epochs=50, 
+                                                                       batch_size=32
+                                                                       )
+
+features = base_features + mutation_embed_features_all + cyto_embed_features_all
+
+ci_test, model = train_lightgbm_survival_model(patients_train, 
                               features, 
                               tau=7, 
-                              test_size=0.3, 
+                              test_size=0.33, 
                               seed=42
                               )
+
+
 
 
 # from itertools import product

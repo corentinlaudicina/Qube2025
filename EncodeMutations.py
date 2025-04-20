@@ -8,7 +8,7 @@ from tensorflow.keras.models import Model
 
 from sklearn.cluster import KMeans
 
-import DataStructs  
+import autoencoder
 
 def build_binary_mutation_matrix(patients, min_gene_freq=5):
     """
@@ -46,52 +46,84 @@ def build_binary_mutation_matrix(patients, min_gene_freq=5):
 
     return X_binary, patient_ids, selected_genes
 
-def train_autoencoder(X, encoding_dim=16, epochs=50, batch_size=32):
-    input_dim = X.shape[1]
-    input_layer = Input(shape=(input_dim,))
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-    encoded = Dense(64, activation='relu',
-                    kernel_regularizer=regularizers.l2(1e-4))(input_layer)
-    encoded = Dropout(0.3)(encoded)  # Dropout for regularization
-    encoded = Dense(encoding_dim, activation='relu')(encoded)
+def build_mutation_tfidf_matrix(patients, max_features=1000):
+    """
+    Builds TF-IDF matrix from gene:protein_change mutations.
+    Each patient is treated as a 'document' of mutation tokens.
+    """
+    mutation_docs = []
+    patient_ids = []
 
-    decoded = Dense(64, activation='relu')(encoded)
-    decoded = Dense(input_dim, activation='sigmoid')(decoded)
+    for p in patients:
+        mutation_tokens = []
+        for mut in p.somatic_mutations:
 
-    autoencoder = Model(input_layer, decoded)
-    autoencoder.compile(optimizer='adam', loss='binary_crossentropy')
+            if type(mut.VAF) == float and mut.VAF < 0.02:
+                continue
+            else:
+                token = f"{mut.GENE}:{mut.PROTEIN_CHANGE}:{mut.EFFECT}".lower()
+                mutation_tokens.append(token)
 
-    autoencoder.fit(X, X,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    shuffle=True,
-                    verbose=0)
+        mutation_docs.append(" ".join(mutation_tokens))
+        patient_ids.append(p.ID)
 
-    encoder = Model(input_layer, encoded)
-    return encoder, autoencoder
+    vectorizer = TfidfVectorizer(max_features=max_features)
+    X_tfidf = vectorizer.fit_transform(mutation_docs).toarray()
+    feature_names = vectorizer.get_feature_names_out()
 
-def get_mutation_autoencoder_embedding(patients, encoding_dim=16, epochs=50, batch_size=32):
-    mutation_matrix, patient_ids, selected_genes = build_binary_mutation_matrix(patients, min_gene_freq=5)
-    X_binary = mutation_matrix
+    return X_tfidf, feature_names, patient_ids
 
-    encoder, _ = train_autoencoder(X_binary, encoding_dim=encoding_dim, epochs=epochs, batch_size=batch_size)
-    X_embed = encoder.predict(X_binary)
+def build_mut_tfidf_matrix(patients, max_features=500):
+    X_tfidf, _, patient_ids = build_mutation_tfidf_matrix(patients, max_features=max_features)
+    return X_tfidf, patient_ids
+
+def get_mutations_embedding(patients, 
+                              matrix_builder_fn, 
+                              embed_prefix="embed", 
+                              encoding_dim=16, 
+                              epochs=50, 
+                              batch_size=32):
+    """
+    Generic function for assigning autoencoder embeddings to patients.
+
+    Args:
+        patients: list of Patient objects
+        matrix_builder_fn: function returning (X_matrix, patient_ids)
+        embed_prefix: prefix for attribute names (e.g., "cyto_embed", "mut_embed")
+        encoding_dim: output dimension of the autoencoder
+        epochs: number of training epochs
+        batch_size: batch size during training
+
+    Returns:
+        List of embedding feature names: [f"{prefix}_0", ..., f"{prefix}_{k}"]
+    """
+    X, patient_ids = matrix_builder_fn(patients)
+
+    encoder, _ = autoencoder.train_autoencoder(X, encoding_dim=encoding_dim, epochs=epochs, batch_size=batch_size)
+    X_embed = encoder.predict(X)
 
     pid_map = {p.ID: p for p in patients}
     for i, pid in enumerate(patient_ids):
-        if pid in pid_map:
+        patient = pid_map.get(pid)
+        if patient:
             for j in range(encoding_dim):
-                setattr(pid_map[pid], f"mut_embed_{j}", float(X_embed[i][j]))
+                setattr(patient, f"{embed_prefix}_{j}", float(X_embed[i, j]))
 
-    print(f"Assigned mutation autoencoder embedding to {len(patient_ids)} patients.")
-    return [f"mut_embed_{i}" for i in range(encoding_dim)]
+    print(f"Assigned {embed_prefix} embeddings to {len(patient_ids)} patients.")
+
+    mut_feat_names = [f"{embed_prefix}_{j}" for j in range(encoding_dim)]
+
+    return mut_feat_names, X_embed, patient_ids
+    # return [f"{embed_prefix}_{j}" for j in range(encoding_dim)]
 
 def assign_mutation_cluster(patients, encoding_dim=16, epochs=50, batch_size=32, n_clusters=5):
 
     mutation_matrix, patient_ids, selected_genes = build_binary_mutation_matrix(patients, min_gene_freq=5)
     X_binary = mutation_matrix
 
-    autoencoder = train_autoencoder(X_binary, encoding_dim=encoding_dim,
+    autoencoder = autoencoder.train_autoencoder(X_binary, encoding_dim=encoding_dim,
                                                     epochs=epochs, batch_size=batch_size)
     X_embed = autoencoder.predict(X_binary)
 
@@ -109,6 +141,7 @@ def assign_mutation_cluster(patients, encoding_dim=16, epochs=50, batch_size=32,
             print(f"[Warning] ID {pid} not found")
 
     print(f"One-hot cluster features assigned to {len(patient_ids)} patients.")
+
     return [f"mutation_cluster_{i}" for i in range(n_clusters)]
 
 def build_top_gene_features(patients, top_n=50):
@@ -135,7 +168,6 @@ def build_top_gene_features(patients, top_n=50):
     return X, patient_ids, feature_names
 
 def build_top_mutation_features(patients, top_n=5):
-    # Count full mutation keys
     key_list = []
     for p in patients:
         for mut in p.somatic_mutations:
@@ -172,3 +204,44 @@ def build_top_mutation_features(patients, top_n=5):
 # encoder = train_autoencoder(df_binary.values, encoding_dim=16, epochs=100, batch_size=32)
 
 # X_mutation_embed = encoder.predict(df_binary)  # shape = (n_patients, 16)
+
+
+## PICKLE 
+
+# import os, sys 
+# project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
+# if project_root not in sys.path:
+#     sys.path.insert(0, project_root)
+
+# import DataStructs
+# import pickle 
+
+# dir_train = os.path.join(project_root,"train")
+# dir_test = os.path.join(project_root,"test")
+
+# patients_train = []
+# DataStructs.read_clinical_data(patients_train, os.path.join(dir_train, "clinical_train.csv"))
+# DataStructs.add_status(patients_train, os.path.join(dir_train, "target_train.csv"))
+# DataStructs.add_somatic_mutations(patients_train, os.path.join(dir_train, "molecular_train.csv"))
+# DataStructs.aggregate_mutation_features(patients_train)
+# DataStructs.parse_cytogenetics(patients_train)
+
+# patients_test = []
+# DataStructs.read_clinical_data(patients_test, os.path.join(dir_test, "clinical_test.csv"))
+# DataStructs.add_somatic_mutations(patients_test, os.path.join(dir_test, "molecular_test.csv"))
+# DataStructs.aggregate_mutation_features(patients_test)
+# DataStructs.parse_cytogenetics(patients_test)
+
+# patients_all = patients_train + patients_test
+
+# mut_feat_names, X_mut_embed, mut_ids = get_mutations_embedding(patients_all, 
+#                                                     build_mut_tfidf_matrix, 
+#                                                     embed_prefix="embed_mut", 
+#                                                     encoding_dim=8, 
+#                                                     epochs=50, 
+#                                                     batch_size=16
+#                                                     )
+
+# with open(os.path.join("encoded_data", "mutation_embeddings.pkl"), "wb") as f:
+#     pickle.dump({"ids": mut_ids, "features": mut_feat_names, "embeddings": X_mut_embed}, f)
+

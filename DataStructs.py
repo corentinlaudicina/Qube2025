@@ -4,7 +4,6 @@ import numpy as np
 class SomaticMutation:
     def __init__(self, CHR, START, END, REF, ALT, GENE, PROTEIN_CHANGE, EFFECT, VAF):
 
-        ## Molecular features
         self.CHR = CHR
         self.START = START
         self.END = END
@@ -16,7 +15,7 @@ class SomaticMutation:
         self.VAF = VAF
 
     def __repr__(self):
-        return (f"SomaticMutation(CHR={self.CHR}, START={self.START}, END={self.END}, "
+        return (f"SomaticMutation(CHR={self.CHR}, START={self.START}, END={self.END},"
                 f"GENE={self.GENE}, VAF={self.VAF})")
 
 class CytogeneticObservation:
@@ -43,11 +42,11 @@ class Patient:
         self.ID = ID
         self.CENTER = CENTER
         self.BM_BLAST = BM_BLAST
-        self.WBC = WBC
-        self.ANC = ANC
+        self.WBC = np.log10(WBC) if WBC and WBC > 0 else None
+        self.ANC = np.log10(ANC) if ANC and ANC > 0 else None
         self.MONOCYTES = MONOCYTES
         self.HB = HB
-        self.PLT = PLT
+        self.PLT = np.log10(PLT) if PLT and PLT > 0 else None
         self.CYTOGENETICS = CYTOGENETICS
 
         self.OS_YEARS = OS_YEARS
